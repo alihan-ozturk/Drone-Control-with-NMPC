@@ -51,10 +51,15 @@ class BaseTrajectory:
         raise NotImplementedError
 
 class CircularTrajectory(BaseTrajectory):
-    def __init__(self, radius=5, altitude=10, total_time=15.0):
+    def __init__(self, radius=5, altitude=10, speed=2.5):
+        """
+        Yapıcı metod artık 'total_time' yerine yörünge hızını ('speed') alır.
+        Açısal hız (omega), teğetsel hızdan hesaplanır: omega = speed / radius.
+        """
         self.radius = radius
         self.altitude = altitude
-        self.omega = 2 * np.pi / total_time
+        self.speed = speed
+        self.omega = self.speed / self.radius if self.radius != 0 else 0
 
     def get_reference(self, t):
         ref_state = np.zeros(12)
@@ -67,27 +72,36 @@ class CircularTrajectory(BaseTrajectory):
         return ref_state
 
 class SquareTrajectory(BaseTrajectory):
-    def __init__(self, side_length=10, altitude=10, total_time=20.0):
+    def __init__(self, side_length=10, altitude=10, speed=2.0):
+        """
+        Yapıcı metod artık 'total_time' yerine yörünge hızını ('speed') alır.
+        Bir kenarı tamamlama süresi hızdan hesaplanır: time_per_side = side_length / speed.
+        """
         self.side = side_length
         self.alt = altitude
-        self.time_per_side = total_time / 4.0
-        self.speed = self.side / self.time_per_side
+        self.speed = speed
+        self.time_per_side = self.side / self.speed if self.speed != 0 else float('inf')
+        self.total_lap_time = 4 * self.time_per_side
 
     def get_reference(self, t):
         ref_state = np.zeros(12)
-        side_index = int(t // self.time_per_side)
-        time_on_side = t % self.time_per_side
         hs = self.side / 2.0
+
+        # Simülasyon süresi bir tur süresini aşarsa yörüngeyi tekrar et
+        time_in_lap = t % self.total_lap_time
+
+        side_index = int(time_in_lap // self.time_per_side)
+        time_on_side = time_in_lap % self.time_per_side
+        
         if side_index == 0:
             ref_x, ref_y, ref_vx, ref_vy = -hs + self.speed * time_on_side, -hs, self.speed, 0
         elif side_index == 1:
             ref_x, ref_y, ref_vx, ref_vy = hs, -hs + self.speed * time_on_side, 0, self.speed
         elif side_index == 2:
             ref_x, ref_y, ref_vx, ref_vy = hs - self.speed * time_on_side, hs, -self.speed, 0
-        elif side_index == 3:
+        else: # side_index == 3
             ref_x, ref_y, ref_vx, ref_vy = -hs, hs - self.speed * time_on_side, 0, -self.speed
-        else:
-            ref_x, ref_y, ref_vx, ref_vy = -hs, -hs, 0, 0
+            
         ref_state[[0, 1, 2, 6, 7]] = [ref_x, ref_y, self.alt, ref_vx, ref_vy]
         return ref_state
 
@@ -183,6 +197,40 @@ class PIDController(BaseController):
         
         u1_total = self.steady_state_u[0] + u1_delta
         return np.array([u1_total, u2, u3, u4])
+    
+class InterpolatedLQRController(BaseController):
+    def __init__(self, quad_dynamics, dataset_filename='lqr_gains_dataset.csv'):
+        super().__init__(quad_dynamics)
+        import pandas as pd
+        try:
+            df = pd.read_csv(dataset_filename)
+            self.psi_values = df['psi_ss'].values
+            
+            gain_columns = [col for col in df.columns if col.startswith('k_')]
+            self.gains = df[gain_columns].values # Shape: (num_points, 48)
+
+        except FileNotFoundError:
+            print(f"HATA: Veri seti dosyası '{dataset_filename}' bulunamadı!")
+            raise
+
+    def calculate_control(self, current_state, reference_state, dt):
+        current_psi = current_state[5]
+
+        # Açıların -pi ve +pi arasında sürekli olması için normalizasyon yapıyoruz.
+        # Bu, enterpolasyonun sınırlarda doğru çalışmasını sağlar.
+        # current_psi = np.arctan2(np.sin(current_psi), np.cos(current_psi))
+
+        # 48 kazanç değerinin her birini anlık psi değerine göre enterpole ediyoruz.
+        interpolated_k_flat = np.zeros(self.gains.shape[1])
+        for i in range(self.gains.shape[1]):
+            interpolated_k_flat[i] = np.interp(current_psi, self.psi_values, self.gains[:, i])
+
+        K = interpolated_k_flat.reshape(4, 12)
+
+        x_delta = current_state - reference_state
+        u_delta = -K @ x_delta
+        
+        return u_delta + self.steady_state_u
 
 class Simulation:
     def __init__(self, quad, controller, trajectory, total_time, dt):
@@ -208,18 +256,22 @@ class Simulation:
 
 if __name__ == '__main__':
     DT = 0.01
-    TOTAL_TIME = 15.0
+    TOTAL_TIME = 25.0 # Simülasyonun toplam süresi (saniye)
+    TRAJECTORY_SPEED = 2 # Yörüngenin hızı (m/s)
+    
     initial_state = np.zeros(12)
 
     quad_model = QuadcopterDynamics()
 
-    trajectory_to_follow = SquareTrajectory(side_length=10, altitude=10, total_time=TOTAL_TIME)
-    # trajectory_to_follow = CircularTrajectory(radius=5, altitude=10, total_time=TOTAL_TIME)
+    trajectory_to_follow = CircularTrajectory(radius=5, altitude=10, speed=TRAJECTORY_SPEED)
+    # trajectory_to_follow = SquareTrajectory(side_length=10, altitude=10, speed=TRAJECTORY_SPEED)
     
     # LQR Kontrolcü
     Q = np.diag([10, 10, 20, 1, 1, 5, 1, 1, 1, 1, 1, 1])
     R = np.diag([0.1, 0.1, 0.1, 0.1])
     controller_to_use = LQRController(quad_model, Q, R)
+
+    # controller_to_use = InterpolatedLQRController(quad_model, 'lqr_gains_dataset.csv')
     
     # controller_to_use = PIDController(quad_model)
 
