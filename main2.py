@@ -110,11 +110,13 @@ class LQRController(BaseController):
 
     def _create_A_matrix(self, psi_ss):
         A = np.zeros((12, 12))
+        c_psi = np.cos(psi_ss)
+        s_psi = np.sin(psi_ss)
         A[0:6, 6:12] = np.identity(6)
-        A[6, 3] = self.quad_dynamics.g * np.cos(psi_ss)
-        A[6, 4] = self.quad_dynamics.g * np.sin(psi_ss)
-        A[7, 3] = self.quad_dynamics.g * np.sin(psi_ss)
-        A[7, 4] = -self.quad_dynamics.g * np.cos(psi_ss)
+        A[6, 3] = self.quad_dynamics.g * c_psi
+        A[6, 4] = self.quad_dynamics.g * s_psi
+        A[7, 3] = self.quad_dynamics.g * s_psi
+        A[7, 4] = -self.quad_dynamics.g * c_psi
         A[6, 6] = -self.quad_dynamics.k1 / self.quad_dynamics.m
         A[7, 7] = -self.quad_dynamics.k2 / self.quad_dynamics.m
         A[8, 8] = -self.quad_dynamics.k3 / self.quad_dynamics.m
