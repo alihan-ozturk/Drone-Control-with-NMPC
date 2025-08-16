@@ -46,20 +46,24 @@ class QuadcopterDynamics:
         state_derivatives = self.state_derivative(state, control_inputs)
         return state + state_derivatives * dt
 
+import numpy as np
+
 class BaseTrajectory:
     def get_reference(self, t):
         raise NotImplementedError
 
 class CircularTrajectory(BaseTrajectory):
-    def __init__(self, radius=5, altitude=10, speed=2.5):
+    def __init__(self, radius=5, altitude=10, speed=2.5, course_lock=False):
         """
-        Yapıcı metod artık 'total_time' yerine yörünge hızını ('speed') alır.
-        Açısal hız (omega), teğetsel hızdan hesaplanır: omega = speed / radius.
+        Yapıcı metoda 'course_lock' parametresi eklendi.
+        course_lock (bool): True ise, drone'un burnu her zaman hareket yönüne bakar.
+                            False ise, varsayılan olarak psi açısı 0'da kalır.
         """
         self.radius = radius
         self.altitude = altitude
         self.speed = speed
         self.omega = self.speed / self.radius if self.radius != 0 else 0
+        self.course_lock = course_lock
 
     def get_reference(self, t):
         ref_state = np.zeros(12)
@@ -68,28 +72,32 @@ class CircularTrajectory(BaseTrajectory):
         ref_z = self.altitude
         ref_vx = -self.radius * self.omega * np.sin(self.omega * t)
         ref_vy = self.radius * self.omega * np.cos(self.omega * t)
-        ref_state[[0, 1, 2, 6, 7]] = [ref_x, ref_y, ref_z, ref_vx, ref_vy]
+
+        ref_psi = 0.0
+        if self.course_lock:
+            ref_psi = np.arctan2(ref_vy, ref_vx)
+
+        ref_state[[0, 1, 2, 5, 6, 7]] = [ref_x, ref_y, ref_z, ref_psi, ref_vx, ref_vy]
         return ref_state
 
 class SquareTrajectory(BaseTrajectory):
-    def __init__(self, side_length=10, altitude=10, speed=2.0):
+    def __init__(self, side_length=10, altitude=10, speed=2.0, course_lock=False):
         """
-        Yapıcı metod artık 'total_time' yerine yörünge hızını ('speed') alır.
-        Bir kenarı tamamlama süresi hızdan hesaplanır: time_per_side = side_length / speed.
+        Yapıcı metoda 'course_lock' parametresi eklendi.
+        course_lock (bool): True ise, drone'un burnu her zaman hareket yönüne bakar.
+                            False ise, varsayılan olarak psi açısı 0'da kalır.
         """
         self.side = side_length
         self.alt = altitude
         self.speed = speed
         self.time_per_side = self.side / self.speed if self.speed != 0 else float('inf')
         self.total_lap_time = 4 * self.time_per_side
+        self.course_lock = course_lock
 
     def get_reference(self, t):
         ref_state = np.zeros(12)
         hs = self.side / 2.0
-
-        # Simülasyon süresi bir tur süresini aşarsa yörüngeyi tekrar et
         time_in_lap = t % self.total_lap_time
-
         side_index = int(time_in_lap // self.time_per_side)
         time_on_side = time_in_lap % self.time_per_side
         
@@ -101,8 +109,13 @@ class SquareTrajectory(BaseTrajectory):
             ref_x, ref_y, ref_vx, ref_vy = hs - self.speed * time_on_side, hs, -self.speed, 0
         else: # side_index == 3
             ref_x, ref_y, ref_vx, ref_vy = -hs, hs - self.speed * time_on_side, 0, -self.speed
-            
-        ref_state[[0, 1, 2, 6, 7]] = [ref_x, ref_y, self.alt, ref_vx, ref_vy]
+
+        ref_psi = 0.0
+        if self.course_lock:
+            if not (ref_vx == 0 and ref_vy == 0):
+                ref_psi = np.arctan2(ref_vy, ref_vx)
+
+        ref_state[[0, 1, 2, 5, 6, 7]] = [ref_x, ref_y, self.alt, ref_psi, ref_vx, ref_vy]
         return ref_state
 
 class BaseController:
@@ -218,7 +231,7 @@ class InterpolatedLQRController(BaseController):
 
         # Açıların -pi ve +pi arasında sürekli olması için normalizasyon yapıyoruz.
         # Bu, enterpolasyonun sınırlarda doğru çalışmasını sağlar.
-        # current_psi = np.arctan2(np.sin(current_psi), np.cos(current_psi))
+        current_psi = np.arctan2(np.sin(current_psi), np.cos(current_psi))
 
         # 48 kazanç değerinin her birini anlık psi değerine göre enterpole ediyoruz.
         interpolated_k_flat = np.zeros(self.gains.shape[1])
@@ -263,8 +276,8 @@ if __name__ == '__main__':
 
     quad_model = QuadcopterDynamics()
 
-    trajectory_to_follow = CircularTrajectory(radius=5, altitude=10, speed=TRAJECTORY_SPEED)
-    # trajectory_to_follow = SquareTrajectory(side_length=10, altitude=10, speed=TRAJECTORY_SPEED)
+    # trajectory_to_follow = CircularTrajectory(radius=5, altitude=10, speed=TRAJECTORY_SPEED, course_lock=False)
+    trajectory_to_follow = SquareTrajectory(side_length=10, altitude=10, speed=TRAJECTORY_SPEED, course_lock=True)
     
     # LQR Kontrolcü
     Q = np.diag([10, 10, 20, 1, 1, 5, 1, 1, 1, 1, 1, 1])
