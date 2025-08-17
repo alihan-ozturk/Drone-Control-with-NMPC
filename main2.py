@@ -280,6 +280,7 @@ class InterpolatedLQRController(BaseController):
         
         return u_delta + self.steady_state_u
 
+
 class Simulation:
     def __init__(self, quad, controller, trajectory, total_time, dt):
         self.quad = quad
@@ -292,15 +293,22 @@ class Simulation:
     def run(self, initial_state):
         current_state = initial_state.copy()
         history = [current_state]
+        control_history = []
+        
+        u_steady_state = self.quad.steady_state_u 
 
         for i in range(self.num_steps):
             t = i * self.dt
             reference_state = self.trajectory.get_reference(t)
+            
             control_inputs = self.controller.calculate_control(current_state, reference_state, self.dt)
+            control_history.append(control_inputs)
+
             current_state = self.quad.update_state(current_state, control_inputs, self.dt)
             history.append(current_state.copy())
             
-        return np.array(history)
+        return np.array(history), np.array(control_history)
+
 
 if __name__ == '__main__':
     DT = 0.01
@@ -329,7 +337,7 @@ if __name__ == '__main__':
                             total_time=TOTAL_TIME, 
                             dt=DT)
     
-    simulation_history = simulation.run(initial_state)
+    simulation_history, control_history = simulation.run(initial_state)
 
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection='3d')
