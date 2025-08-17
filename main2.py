@@ -3,6 +3,11 @@ from scipy.linalg import solve_continuous_are
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 
+import torch
+from torch import nn
+import joblib
+from model_train_pytorch import GainPredictor
+
 class QuadcopterDynamics:
     def __init__(self):
         self.m = 2.0      # Kütle (kg)
@@ -54,16 +59,12 @@ class BaseTrajectory:
 
 class CircularTrajectory(BaseTrajectory):
     def __init__(self, radius=5, altitude=10, speed=2.5, course_lock=False):
-        """
-        Yapıcı metoda 'course_lock' parametresi eklendi.
-        course_lock (bool): True ise, drone'un burnu her zaman hareket yönüne bakar.
-                            False ise, varsayılan olarak psi açısı 0'da kalır.
-        """
         self.radius = radius
         self.altitude = altitude
         self.speed = speed
         self.omega = self.speed / self.radius if self.radius != 0 else 0
         self.course_lock = course_lock
+        self.total_lap_time = (2 * np.pi * self.radius) / self.speed
 
     def get_reference(self, t):
         ref_state = np.zeros(12)
@@ -82,11 +83,6 @@ class CircularTrajectory(BaseTrajectory):
 
 class SquareTrajectory(BaseTrajectory):
     def __init__(self, side_length=10, altitude=10, speed=2.0, course_lock=False):
-        """
-        Yapıcı metoda 'course_lock' parametresi eklendi.
-        course_lock (bool): True ise, drone'un burnu her zaman hareket yönüne bakar.
-                            False ise, varsayılan olarak psi açısı 0'da kalır.
-        """
         self.side = side_length
         self.alt = altitude
         self.speed = speed
@@ -127,7 +123,7 @@ class BaseController:
         raise NotImplementedError
 
 class LQRController(BaseController):
-    def __init__(self, quad_dynamics, Q, R, psi_tol=np.pi/6):
+    def __init__(self, quad_dynamics, Q, R, psi_tol=np.pi/36):
         super().__init__(quad_dynamics)
         self.Q = Q
         self.R = R
@@ -173,6 +169,45 @@ class LQRController(BaseController):
         
         x_delta = current_state - reference_state
         u_delta = -self.K @ x_delta
+        return u_delta + self.steady_state_u
+    
+
+class PyTorchController(BaseController):
+    def __init__(self, quad_dynamics, model_filename='lqr_pytorch_model.pth', scaler_X="scaler_X.pkl", scaler_y="scaler_y.pkl"):
+        super().__init__(quad_dynamics)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"PyTorch '{self.device}' cihazını kullanıyor.")
+
+        # Modeli ve Ölçekleyicileri Yükle
+        self.model = GainPredictor().to(self.device)
+        try:
+            self.model.load_state_dict(torch.load(model_filename, map_location=self.device))
+            self.scaler_X = joblib.load(scaler_X)
+            self.scaler_y = joblib.load(scaler_y)
+        except FileNotFoundError as e:
+            print(f"\nHATA: Gerekli bir dosya bulunamadı ({e.filename})!")
+            raise
+        
+        self.model.eval()
+
+    def calculate_control(self, current_state, reference_state, dt):
+        current_psi = current_state[5]
+        normalized_psi = np.arctan2(np.sin(current_psi), np.cos(current_psi))
+        
+        input_data = np.array([[normalized_psi]])
+        scaled_input = self.scaler_X.transform(input_data)
+        input_tensor = torch.tensor(scaled_input, dtype=torch.float32).to(self.device)
+
+        with torch.no_grad():
+            scaled_k_flat_tensor = self.model(input_tensor)
+        
+        scaled_k_flat = scaled_k_flat_tensor.cpu().numpy()
+        rescaled_k_flat = self.scaler_y.inverse_transform(scaled_k_flat)
+        
+        K = rescaled_k_flat.reshape(4, 12)
+        x_delta = current_state - reference_state
+        u_delta = -K @ x_delta
+        
         return u_delta + self.steady_state_u
 
 class PIDController(BaseController):
@@ -276,17 +311,17 @@ if __name__ == '__main__':
 
     quad_model = QuadcopterDynamics()
 
-    # trajectory_to_follow = CircularTrajectory(radius=5, altitude=10, speed=TRAJECTORY_SPEED, course_lock=False)
-    trajectory_to_follow = SquareTrajectory(side_length=10, altitude=10, speed=TRAJECTORY_SPEED, course_lock=True)
+    trajectory_to_follow = CircularTrajectory(radius=5, altitude=10, speed=TRAJECTORY_SPEED, course_lock=False)
+    # trajectory_to_follow = SquareTrajectory(side_length=10, altitude=10, speed=TRAJECTORY_SPEED, course_lock=True)
     
     # LQR Kontrolcü
     Q = np.diag([10, 10, 20, 1, 1, 5, 1, 1, 1, 1, 1, 1])
     R = np.diag([0.1, 0.1, 0.1, 0.1])
-    controller_to_use = LQRController(quad_model, Q, R)
-
-    # controller_to_use = InterpolatedLQRController(quad_model, 'lqr_gains_dataset.csv')
     
+    # controller_to_use = LQRController(quad_model, Q, R)
+    controller_to_use = InterpolatedLQRController(quad_model, 'lqr_gains_dataset.csv')
     # controller_to_use = PIDController(quad_model)
+    # controller_to_use = PyTorchController(quad_model, model_filename='best_model.pth', scaler_X="scaler_X.pkl", scaler_y="scaler_y.pkl")
 
     simulation = Simulation(quad=quad_model, 
                             controller=controller_to_use, 
